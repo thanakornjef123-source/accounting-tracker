@@ -13,6 +13,7 @@ import pandas as pd
 
 from . import workflow as wf
 from .deadlines import EFILING, FormRule, filing_deadline, nominal_day_in_filing_month
+from .i18n import date_text, period_text, translate
 from .periods import thai_date, thai_label
 
 DOC_MISSING, DOC_RECEIVED, DOC_RESUBMIT = "missing", "received", "resubmit"
@@ -483,8 +484,14 @@ def notifications(conn: sqlite3.Connection) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- client report
 
-def client_report(conn: sqlite3.Connection, client_id: int, period: str) -> str:
+def client_report(conn: sqlite3.Connection, client_id: int, period: str, lang: str = "th") -> str:
     """A standard monthly status report built only from data in the system."""
+    def tr(text: str, **params) -> str:
+        return translate(text, lang, **params)
+
+    def day(iso) -> str:
+        return date_text(date.fromisoformat(iso), lang) if isinstance(iso, str) and iso else "-"
+
     c = client(conn, client_id)
     docs = documents(conn, period)
     docs = docs[docs["client_id"] == client_id]
@@ -492,44 +499,36 @@ def client_report(conn: sqlite3.Connection, client_id: int, period: str) -> str:
     t = t[t["client_id"] == client_id]
 
     lines = [
-        f"# รายงานสถานะงานประจำเดือน {thai_label(period)}",
+        f"# {tr('รายงานสถานะงานประจำเดือน')} {period_text(period, lang)}",
         "",
-        f"**ลูกค้า:** {c['name']}  ",
-        f"**ผู้รับผิดชอบ:** {staff_name(conn, c['primary_staff_id'])}  ",
-        f"**วันที่ออกรายงาน:** {thai_date(today(conn))}",
+        f"**{tr('ลูกค้า')}:** {tr(c['name'])}  ",
+        f"**{tr('ผู้รับผิดชอบ')}:** {tr(staff_name(conn, c['primary_staff_id']))}  ",
+        f"**{tr('วันที่ออกรายงาน')}:** {date_text(today(conn), lang)}",
         "",
-        "## เอกสารที่ได้รับ",
+        f"## {tr('เอกสารที่ได้รับ')}",
         "",
-        "| เอกสาร | สถานะ | ช่องทาง | วันที่รับ |",
+        f"| {tr('เอกสาร')} | {tr('สถานะ')} | {tr('ช่องทาง')} | {tr('วันที่รับ')} |",
         "|---|---|---|---|",
     ]
     for d in docs.itertuples():
-        lines.append(
-            f"| {d.doc_type} | {DOC_STATUS_LABELS[d.status]} | {_text(d.channel)} | {_thai(d.received_on)} |"
-        )
-    lines += ["", "## การยื่นแบบภาษี", "", "| แบบ | กำหนดยื่น | สถานะ | วันที่ยื่น |", "|---|---|---|---|"]
+        channel = tr(d.channel) if isinstance(d.channel, str) and d.channel else "-"
+        lines.append(f"| {tr(d.doc_type)} | {tr(DOC_STATUS_LABELS[d.status])} | {channel} | {day(d.received_on)} |")
+    lines += ["", f"## {tr('การยื่นแบบภาษี')}", "",
+              f"| {tr('แบบ')} | {tr('กำหนดยื่น')} | {tr('สถานะ')} | {tr('วันที่ยื่น')} |", "|---|---|---|---|"]
     for r in t[t["task_type"].map(wf.is_tax_form)].itertuples():
-        lines.append(f"| {r.task_type} | {_thai(r.due_date)} | {r.status_label} | {_thai(r.done_on)} |")
+        lines.append(f"| {tr(r.task_type)} | {day(r.due_date)} | {tr(r.status_label)} | {day(r.done_on)} |")
 
-    outstanding = docs[docs["status"] != DOC_RECEIVED]["doc_type"].tolist()
-    lines += ["", "## สิ่งที่ต้องดำเนินการต่อ", ""]
+    outstanding = [tr(x) for x in docs[docs["status"] != DOC_RECEIVED]["doc_type"]]
+    lines += ["", f"## {tr('สิ่งที่ต้องดำเนินการต่อ')}", ""]
     if outstanding:
-        lines.append(f"- รบกวนส่งเอกสารที่ยังขาด: {', '.join(outstanding)}")
+        lines.append(f"- {tr('รบกวนส่งเอกสารที่ยังขาด')}: {', '.join(outstanding)}")
     pending = t[(t["status"] != wf.DONE) & t["task_type"].map(wf.is_tax_form)]
     for r in pending.itertuples():
-        lines.append(f"- สำนักงานกำลังดำเนินการ {r.task_type} (กำหนดยื่น {_thai(r.due_date)})")
+        lines.append(f"- {tr('สำนักงานกำลังดำเนินการ')} {tr(r.task_type)} ({tr('กำหนดยื่น')} {day(r.due_date)})")
     if not outstanding and pending.empty:
-        lines.append("- ไม่มี งานประจำเดือนนี้เสร็จครบแล้ว")
-    lines += ["", "_รายงานนี้สร้างจากระบบติดตามงานโดยอัตโนมัติ_"]
+        lines.append(f"- {tr('ไม่มีรายการที่ต้องดำเนินการ งานประจำเดือนนี้เสร็จครบแล้ว')}")
+    lines += ["", f"_{tr('รายงานนี้สร้างจากระบบติดตามงานโดยอัตโนมัติ')}_"]
     return "\n".join(lines)
-
-
-def _text(value) -> str:
-    return value if isinstance(value, str) and value else "-"
-
-
-def _thai(iso) -> str:
-    return thai_date(date.fromisoformat(iso)) if isinstance(iso, str) and iso else "-"
 
 
 def recompute_due_dates(conn: sqlite3.Connection, period: str) -> int:

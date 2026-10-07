@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 270 56" width="270" height="56">
+  <rect x="2" y="4" width="48" height="48" rx="13" fill="#FFFFFF"/>
+  <text x="26" y="38" text-anchor="middle" font-family="Leelawadee UI, Tahoma, Arial, sans-serif" font-size="28" font-weight="700" fill="#4E2E7F">฿</text>
+  <circle cx="41" cy="14" r="4" fill="#F58220"/>
+  <text x="62" y="26" font-family="Leelawadee UI, Tahoma, Noto Sans Thai, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">Sample Accounting Office</text>
+  <text x="62" y="44" font-family="Leelawadee UI, Tahoma, Noto Sans Thai, sans-serif" font-size="11.5" fill="#CDBFE6">Monthly job tracker</text>
+</svg>

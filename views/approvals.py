@@ -7,7 +7,7 @@ import streamlit as st
 from tracker import repo
 from tracker import workflow as wf
 
-from .common import Ctx, days_text, flash, fmt_date, page_header
+from .common import Ctx, days_text, error_text, flash, fmt_date, page_header, t
 
 
 def render(ctx: Ctx) -> None:
@@ -18,50 +18,51 @@ def render(ctx: Ctx) -> None:
     approved = tasks[tasks["status"] == wf.APPROVED]
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("รอตรวจ", f"{len(queue)} งาน")
-    c2.metric("ค้างนานสุด", f"{int(queue['waiting_days'].max())} วัน" if not queue.empty else "-")
-    c3.metric("ครบกำหนดภายใน 3 วัน", f"{int((queue['days_left'] <= 3).sum())} งาน")
+    c1.metric(t("รอตรวจ"), t("{n} งาน", n=len(queue)))
+    c2.metric(t("ค้างนานสุด"), t("{n} วัน", n=int(queue["waiting_days"].max())) if not queue.empty else "-")
+    c3.metric(t("ครบกำหนดภายใน 3 วัน"), t("{n} งาน", n=int((queue["days_left"] <= 3).sum())))
 
     if not ctx.is_owner:
-        st.info("หน้านี้สำหรับเจ้าของ เลือก 'ใช้งานในฐานะ' เป็นเจ้าของที่แถบด้านซ้ายเพื่ออนุมัติหรือส่งกลับ")
+        st.info(t("หน้านี้สำหรับเจ้าของ เลือก 'ใช้งานในฐานะ' เป็นเจ้าของที่แถบด้านซ้ายเพื่ออนุมัติหรือส่งกลับ"))
 
     if queue.empty:
-        st.success("ไม่มีงานรอตรวจ")
+        st.success(t("ไม่มีงานรอตรวจ"))
     for row in queue.itertuples():
         with st.container(border=True):
             info, actions = st.columns([3, 2])
             urgent = "🔴 " if row.days_left <= 3 else ""
-            info.markdown(f"**{urgent}{row.task_type}** · {row.client}")
-            info.caption(
-                f"ส่งโดย {row.assignee} · รอมา {int(row.waiting_days)} วัน · "
-                f"กำหนด {fmt_date(row.due_date)} ({days_text(int(row.days_left))})"
-            )
+            info.markdown(f"**{urgent}{t(row.task_type)}** · {t(row.client)}")
+            info.caption(t("ส่งโดย {name} · รอมา {n} วัน · กำหนด {date} ({left})",
+                           name=t(row.assignee), n=int(row.waiting_days), date=fmt_date(row.due_date),
+                           left=days_text(int(row.days_left))))
             if not ctx.is_owner:
                 continue
-            reason = actions.text_input("เหตุผลถ้าส่งกลับ", key=f"why_{row.id}", label_visibility="collapsed",
-                                        placeholder="เหตุผลถ้าส่งกลับ")
+            reason = actions.text_input(t("เหตุผลถ้าส่งกลับ"), key=f"why_{row.id}", label_visibility="collapsed",
+                                        placeholder=t("เหตุผลถ้าส่งกลับ"))
             a, b = actions.columns(2)
-            if a.button("อนุมัติ", key=f"ok_{row.id}", type="primary", width="stretch"):
+            if a.button(t("อนุมัติ"), key=f"ok_{row.id}", type="primary", width="stretch"):
                 repo.act_on_task(conn, row.id, "approve", ctx.user_id)
-                flash(f"อนุมัติแล้ว: {row.task_type} · {row.client}")
+                flash(t("อนุมัติแล้ว: {task} · {client}", task=t(row.task_type), client=t(row.client)))
                 st.rerun()
-            if b.button("ส่งกลับ", key=f"back_{row.id}", width="stretch"):
+            if b.button(t("ส่งกลับ"), key=f"back_{row.id}", width="stretch"):
                 try:
                     repo.act_on_task(conn, row.id, "return", ctx.user_id, reason)
                 except wf.WorkflowError as exc:
-                    st.error(str(exc))
+                    st.error(error_text(exc))
                 else:
-                    flash(f"ส่งกลับให้ {row.assignee} แก้แล้ว", "warning")
+                    flash(t("ส่งกลับให้ {name} แก้แล้ว", name=t(row.assignee)), "warning")
                     st.rerun()
 
     if not approved.empty:
-        st.subheader("อนุมัติแล้ว รอพนักงานยื่น")
+        st.subheader(t("อนุมัติแล้ว รอพนักงานยื่น"))
         st.dataframe(
             approved.assign(due=approved["due_date"].map(fmt_date),
-                            left=approved["days_left"].map(lambda d: days_text(int(d))))
-            [["client", "task_type", "assignee", "due", "left"]],
-            column_config={"client": "ลูกค้า", "task_type": "แบบ", "assignee": "ผู้ยื่น",
-                           "due": "กำหนด", "left": "เหลือเวลา"},
+                            left=approved["days_left"].map(lambda d: days_text(int(d))),
+                            task_name=approved["task_type"].map(t), client=approved["client"].map(t),
+                            assignee=approved["assignee"].map(t))
+            [["client", "task_name", "assignee", "due", "left"]],
+            column_config={"client": t("ลูกค้า"), "task_name": t("แบบ"), "assignee": t("ผู้ยื่น"),
+                           "due": t("กำหนด"), "left": t("เหลือเวลา")},
             hide_index=True,
             width="stretch",
         )

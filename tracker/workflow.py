@@ -74,7 +74,12 @@ ACTIONS = {a.key: a for a in (START, SUBMIT, APPROVE, RETURN, FILE, COMPLETE)}
 
 
 class WorkflowError(ValueError):
-    pass
+    """A move the workflow does not allow. ``key`` and ``params`` let the UI translate it."""
+
+    def __init__(self, key: str, **params: str) -> None:
+        super().__init__(key.format(**params))
+        self.key = key
+        self.params = params
 
 
 def available_actions(task_type: str, status: str, role: str) -> list[Action]:
@@ -96,9 +101,10 @@ def next_status(task_type: str, status: str, action_key: str, role: str, comment
     allowed = {a.key: a for a in available_actions(task_type, status, role)}
     if action_key not in allowed:
         raise WorkflowError(
-            f"ทำ '{ACTIONS[action_key].label if action_key in ACTIONS else action_key}' "
-            f"กับงานสถานะ '{status_label(task_type, status)}' ในบทบาท "
-            f"'{ROLE_LABELS.get(role, role)}' ไม่ได้"
+            "ทำ '{action}' กับงานสถานะ '{status}' ในบทบาท '{role}' ไม่ได้",
+            action=ACTIONS[action_key].label if action_key in ACTIONS else action_key,
+            status=status_label(task_type, status),
+            role=ROLE_LABELS.get(role, role),
         )
     if allowed[action_key].needs_comment and not comment.strip():
         raise WorkflowError("ต้องใส่เหตุผลเมื่อส่งงานกลับให้แก้")

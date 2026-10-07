@@ -120,10 +120,11 @@ hr {{ border-color: {LINE}; }}
 """
 
 
-def inject() -> None:
+def inject(lang: str = "th") -> None:
     """Add the brand logo and CSS. Call once per run, before any page content."""
     try:
-        st.logo("assets/logo.svg", icon_image="assets/mark.svg", size="large")
+        st.logo("assets/logo_en.svg" if lang == "en" else "assets/logo.svg",
+                icon_image="assets/mark.svg", size="large")
     except Exception:  # an older Streamlit or a missing asset must not break the app
         pass
     st.markdown(CSS, unsafe_allow_html=True)
