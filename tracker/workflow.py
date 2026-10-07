@@ -8,7 +8,9 @@ Client reports do not need approval.
     todo -> doing -> review -> done               (bookkeeping)
     todo -> doing -> done                         (client report)
 
-The owner can send a task under review back to ``doing`` with a comment.
+The owner can send a task under review back to ``doing`` with a comment, and can
+also reopen an approved or finished task (for a wrong approval or an amended
+return) with a comment. Both are recorded in the task history.
 """
 
 from __future__ import annotations
@@ -69,8 +71,9 @@ APPROVE = Action("approve", "อนุมัติ")
 RETURN = Action("return", "ส่งกลับให้แก้", needs_comment=True)
 FILE = Action("file", "บันทึกว่ายื่นแล้ว")
 COMPLETE = Action("complete", "ทำเสร็จแล้ว")
+REOPEN = Action("reopen", "เปิดงานกลับมาแก้", needs_comment=True)
 
-ACTIONS = {a.key: a for a in (START, SUBMIT, APPROVE, RETURN, FILE, COMPLETE)}
+ACTIONS = {a.key: a for a in (START, SUBMIT, APPROVE, RETURN, FILE, COMPLETE, REOPEN)}
 
 
 class WorkflowError(ValueError):
@@ -94,6 +97,8 @@ def available_actions(task_type: str, status: str, role: str) -> list[Action]:
         actions += [APPROVE, RETURN]
     elif status == APPROVED and is_tax_form(task_type):
         actions.append(FILE)
+    if role == OWNER and status in (APPROVED, DONE):
+        actions.append(REOPEN)
     return actions
 
 
@@ -108,7 +113,7 @@ def next_status(task_type: str, status: str, action_key: str, role: str, comment
         )
     if allowed[action_key].needs_comment and not comment.strip():
         raise WorkflowError("ต้องใส่เหตุผลเมื่อส่งงานกลับให้แก้")
-    if action_key in (START.key, RETURN.key):
+    if action_key in (START.key, RETURN.key, REOPEN.key):
         return DOING
     if action_key == SUBMIT.key:
         return REVIEW

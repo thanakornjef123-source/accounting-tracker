@@ -57,22 +57,11 @@ NOTE_TEMPLATES = [
 
 
 def _doc_types(vat: bool, employees: bool) -> list[str]:
-    docs = ["รายการเดินบัญชีธนาคาร", "บิล/ใบเสร็จค่าใช้จ่าย"]
-    docs += ["ใบกำกับภาษีซื้อ", "ใบกำกับภาษีขาย"] if vat else ["ใบแจ้งหนี้/ใบเสร็จขาย"]
-    if employees:
-        docs.append("สรุปเงินเดือนพนักงาน")
-    return docs
+    return repo.default_doc_types(vat, employees)
 
 
 def _forms(vat: bool, employees: bool, pays_individuals: bool) -> list[str]:
-    forms = ["ภ.ง.ด.53"]
-    if employees:
-        forms.append("ภ.ง.ด.1")
-    if pays_individuals:
-        forms.append("ภ.ง.ด.3")
-    if vat:
-        forms.append("ภ.พ.30")
-    return forms
+    return repo.default_forms(vat, employees, pays_individuals)
 
 
 def _business_days_before(d: date, n: int) -> date:
@@ -97,6 +86,7 @@ def seed(conn: sqlite3.Connection, rng_seed: int = 42) -> None:
         "filing_method": "efiling",
         "bookkeeping_day": "10",
         "report_day": "28",
+        "demo": "1",
     }.items():
         conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
 
@@ -130,6 +120,19 @@ def seed(conn: sqlite3.Connection, rng_seed: int = 42) -> None:
 
     _seed_finished_period(conn, rng, HISTORY_PERIOD)
     _seed_current_period(conn, rng, CURRENT_PERIOD)
+
+
+def init_blank(conn: sqlite3.Connection, owner_name: str = "เจ้าของ") -> None:
+    """An empty office for real use: standard deadline rules, one owner, and the current period."""
+    conn.execute("INSERT INTO staff (id, name, role) VALUES (1, ?, ?)", (owner_name, wf.OWNER))
+    conn.executemany(
+        "INSERT INTO deadline_rules (form, paper_day, efiling_day) VALUES (?, ?, ?)",
+        [(r.form, r.paper_day, r.efiling_day) for r in DEFAULT_RULES.values()],
+    )
+    for key, value in {"filing_method": "efiling", "bookkeeping_day": "10", "report_day": "28"}.items():
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    repo.ensure_period(conn)
 
 
 def _set_today(conn: sqlite3.Connection, d: date) -> None:
@@ -260,7 +263,7 @@ def _seed_current_period(conn: sqlite3.Connection, rng: random.Random, period: s
 
 def reset(conn: sqlite3.Connection) -> None:
     """Wipe everything and load the demo data again."""
-    for table in ("notifications", "task_events", "tasks", "documents", "client_forms",
+    for table in ("notifications", "doc_events", "task_events", "tasks", "documents", "client_forms",
                   "client_doc_types", "clients", "holidays", "deadline_rules", "settings", "staff"):
         conn.execute(f"DELETE FROM {table}")
     conn.commit()

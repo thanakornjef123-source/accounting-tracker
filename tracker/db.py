@@ -7,9 +7,11 @@ from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS staff (
-    id      INTEGER PRIMARY KEY,
-    name    TEXT NOT NULL,
-    role    TEXT NOT NULL CHECK (role IN ('owner', 'accountant', 'admin'))
+    id            INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL,
+    role          TEXT NOT NULL CHECK (role IN ('owner', 'accountant', 'admin')),
+    active        INTEGER NOT NULL DEFAULT 1,
+    password_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS clients (
@@ -22,7 +24,8 @@ CREATE TABLE IF NOT EXISTS clients (
     contact          TEXT NOT NULL,
     primary_staff_id INTEGER NOT NULL REFERENCES staff(id),
     backup_staff_id  INTEGER REFERENCES staff(id),
-    notes            TEXT NOT NULL DEFAULT ''
+    notes            TEXT NOT NULL DEFAULT '',
+    active           INTEGER NOT NULL DEFAULT 1
 );
 
 -- Documents each client must send every month
@@ -64,6 +67,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     submitted_on TEXT,
     approved_on  TEXT,
     done_on      TEXT,
+    filing_ref   TEXT NOT NULL DEFAULT '',
     UNIQUE (client_id, period, task_type)
 );
 
@@ -75,6 +79,18 @@ CREATE TABLE IF NOT EXISTS task_events (
     from_status TEXT,
     to_status   TEXT,
     comment     TEXT NOT NULL DEFAULT '',
+    at          TEXT NOT NULL
+);
+
+-- Who changed which document and when
+CREATE TABLE IF NOT EXISTS doc_events (
+    id          INTEGER PRIMARY KEY,
+    document_id INTEGER NOT NULL REFERENCES documents(id),
+    actor_id    INTEGER REFERENCES staff(id),
+    from_status TEXT NOT NULL,
+    to_status   TEXT NOT NULL,
+    channel     TEXT,
+    note        TEXT NOT NULL DEFAULT '',
     at          TEXT NOT NULL
 );
 
@@ -108,11 +124,32 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 
+# Columns added after the first release, for databases created by an older version
+MIGRATIONS = [
+    ("staff", "active", "INTEGER NOT NULL DEFAULT 1"),
+    ("staff", "password_hash", "TEXT NOT NULL DEFAULT ''"),
+    ("clients", "active", "INTEGER NOT NULL DEFAULT 1"),
+    ("tasks", "filing_ref", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, definition in MIGRATIONS:
+        have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    conn.commit()
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
+    if str(path) != ":memory:":
+        conn.execute("PRAGMA journal_mode = WAL")  # readers do not block the writer
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 

@@ -6,7 +6,12 @@ before returning so each user action is one transaction.
 
 from __future__ import annotations
 
+import functools
+import os
+import re
 import sqlite3
+import tempfile
+import threading
 from datetime import date
 
 import pandas as pd
@@ -36,6 +41,20 @@ EVENT_LABELS = {
 }
 
 
+# ---------------------------------------------------------------- one writer at a time
+
+_LOCK = threading.RLock()
+
+
+def locked(fn):
+    """Serialise functions that change data: every browser session shares one connection."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
 # ---------------------------------------------------------------- settings
 
 def get_setting(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
@@ -43,6 +62,7 @@ def get_setting(conn: sqlite3.Connection, key: str, default: str | None = None) 
     return row["value"] if row else default
 
 
+@locked
 def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?, ?) "
@@ -68,8 +88,9 @@ def internal_day(conn: sqlite3.Connection, key: str, default: int) -> int:
 
 # ---------------------------------------------------------------- reference data
 
-def staff(conn: sqlite3.Connection) -> pd.DataFrame:
-    return pd.read_sql_query("SELECT id, name, role FROM staff ORDER BY id", conn)
+def staff(conn: sqlite3.Connection, include_inactive: bool = False) -> pd.DataFrame:
+    where = "" if include_inactive else "WHERE active = 1"
+    return pd.read_sql_query(f"SELECT id, name, role, active FROM staff {where} ORDER BY id", conn)
 
 
 def staff_name(conn: sqlite3.Connection, staff_id: int) -> str:
@@ -90,6 +111,7 @@ def holidays_df(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query("SELECT day, name FROM holidays ORDER BY day", conn)
 
 
+@locked
 def replace_holidays(conn: sqlite3.Connection, rows: list[tuple[str, str]]) -> None:
     conn.execute("DELETE FROM holidays")
     conn.executemany("INSERT INTO holidays (day, name) VALUES (?, ?)", rows)
@@ -103,6 +125,7 @@ def rules(conn: sqlite3.Connection) -> dict[str, FormRule]:
     }
 
 
+@locked
 def update_rule(conn: sqlite3.Connection, form: str, paper_day: int, efiling_day: int) -> None:
     conn.execute(
         "UPDATE deadline_rules SET paper_day = ?, efiling_day = ? WHERE form = ?",
@@ -113,15 +136,17 @@ def update_rule(conn: sqlite3.Connection, form: str, paper_day: int, efiling_day
 
 # ---------------------------------------------------------------- clients
 
-def clients(conn: sqlite3.Connection) -> pd.DataFrame:
+def clients(conn: sqlite3.Connection, include_inactive: bool = False) -> pd.DataFrame:
+    where = "" if include_inactive else "WHERE c.active = 1"
     return pd.read_sql_query(
-        """
+        f"""
         SELECT c.id, c.name, c.business_type, c.vat_registered, c.has_employees,
-               c.channel, c.contact, c.primary_staff_id, c.backup_staff_id, c.notes,
+               c.channel, c.contact, c.primary_staff_id, c.backup_staff_id, c.notes, c.active,
                p.name AS primary_staff, b.name AS backup_staff
         FROM clients c
         JOIN staff p ON p.id = c.primary_staff_id
         LEFT JOIN staff b ON b.id = c.backup_staff_id
+        {where}
         ORDER BY c.name
         """,
         conn,
@@ -142,6 +167,7 @@ def client_forms(conn: sqlite3.Connection, client_id: int) -> list[str]:
         "SELECT form FROM client_forms WHERE client_id = ? ORDER BY form", (client_id,))]
 
 
+@locked
 def update_client(
     conn: sqlite3.Connection,
     client_id: int,
@@ -154,6 +180,7 @@ def update_client(
 ) -> None:
     if backup_staff_id == primary_staff_id:
         raise ValueError("ผู้รับผิดชอบหลักและสำรองต้องเป็นคนละคน")
+    validate_contact(channel, contact)
     conn.execute(
         """UPDATE clients SET primary_staff_id = ?, backup_staff_id = ?, channel = ?,
            contact = ?, notes = ? WHERE id = ?""",
@@ -169,6 +196,30 @@ def periods(conn: sqlite3.Connection) -> list[str]:
         "SELECT DISTINCT period FROM tasks ORDER BY period DESC")]
 
 
+def is_demo(conn: sqlite3.Connection) -> bool:
+    return get_setting(conn, "demo") == "1"
+
+
+@locked
+def ensure_period(conn: sqlite3.Connection) -> None:
+    """Make sure at least one period exists: the month before today's date."""
+    if not periods(conn):
+        from .periods import add_months, period_of
+        open_period(conn, add_months(period_of(today(conn)), -1))
+
+
+@locked
+def rename_staff(conn: sqlite3.Connection, staff_id: int, name: str) -> None:
+    name = " ".join(name.split())
+    if not name:
+        raise ValueError("ต้องใส่ชื่อพนักงาน")
+    if conn.execute("SELECT 1 FROM staff WHERE name = ? AND active = 1 AND id != ?", (name, staff_id)).fetchone():
+        raise ValueError("มีพนักงานชื่อนี้อยู่แล้ว")
+    conn.execute("UPDATE staff SET name = ? WHERE id = ?", (name, staff_id))
+    conn.commit()
+
+
+@locked
 def open_period(conn: sqlite3.Connection, period: str) -> int:
     """Create the document checklist and tasks for every client. Idempotent.
 
@@ -181,7 +232,7 @@ def open_period(conn: sqlite3.Connection, period: str) -> int:
     report_due = nominal_day_in_filing_month(period, internal_day(conn, "report_day", 28), hol)
 
     created = 0
-    for c in conn.execute("SELECT id, primary_staff_id FROM clients").fetchall():
+    for c in conn.execute("SELECT id, primary_staff_id FROM clients WHERE active = 1").fetchall():
         for doc_type in client_doc_types(conn, c["id"]):
             conn.execute(
                 "INSERT OR IGNORE INTO documents (client_id, period, doc_type) VALUES (?, ?, ?)",
@@ -212,7 +263,7 @@ def documents(conn: sqlite3.Connection, period: str) -> pd.DataFrame:
         SELECT d.id, d.client_id, c.name AS client, d.doc_type, d.status,
                d.channel, d.received_on, d.note
         FROM documents d JOIN clients c ON c.id = d.client_id
-        WHERE d.period = ?
+        WHERE d.period = ? AND c.active = 1
         ORDER BY c.name, d.doc_type
         """,
         conn,
@@ -233,6 +284,7 @@ def document_summary(conn: sqlite3.Connection, period: str) -> pd.DataFrame:
         FROM clients c
         JOIN staff s ON s.id = c.primary_staff_id
         JOIN documents d ON d.client_id = c.id AND d.period = ?
+        WHERE c.active = 1
         GROUP BY c.id
         ORDER BY (COUNT(d.id) - SUM(d.status = 'received')) DESC, c.name
         """,
@@ -250,9 +302,11 @@ def docs_complete(conn: sqlite3.Connection, client_id: int, period: str) -> bool
     return row["total"] > 0 and row["ok"] == row["total"]
 
 
+@locked
 def update_documents(
     conn: sqlite3.Connection,
     changes: list[dict],
+    actor_id: int | None = None,
 ) -> list[str]:
     """Apply status/channel/note changes. Returns the notification messages created.
 
@@ -270,6 +324,11 @@ def update_documents(
             raise ValueError("ระบุช่องทางที่ได้รับเอกสารด้วย")
         row = conn.execute("SELECT client_id, period, status FROM documents WHERE id = ?", (ch["id"],)).fetchone()
         received_on = on if status == DOC_RECEIVED and row["status"] != DOC_RECEIVED else None
+        conn.execute(
+            """INSERT INTO doc_events (document_id, actor_id, from_status, to_status, channel, note, at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ch["id"], actor_id, row["status"], status, channel, (ch.get("note") or "").strip(), on),
+        )
         conn.execute(
             """UPDATE documents SET status = ?, channel = ?, note = ?,
                received_on = CASE WHEN ? = 'received' THEN COALESCE(?, received_on) ELSE NULL END
@@ -289,6 +348,7 @@ def update_documents(
     return messages
 
 
+@locked
 def remind_outstanding(conn: sqlite3.Connection, period: str) -> list[str]:
     """Send one reminder per client that still owes documents."""
     messages = []
@@ -308,17 +368,18 @@ def remind_outstanding(conn: sqlite3.Connection, period: str) -> list[str]:
 TASKS_SQL = """
 SELECT t.id, t.client_id, c.name AS client, t.period, t.task_type, t.status,
        t.assignee_id, s.name AS assignee, c.backup_staff_id, t.due_date,
-       t.submitted_on, t.approved_on, t.done_on
+       t.submitted_on, t.approved_on, t.done_on, t.filing_ref
 FROM tasks t
 JOIN clients c ON c.id = t.client_id
 JOIN staff s ON s.id = t.assignee_id
+WHERE c.active = 1
 """
 
 
 def tasks(conn: sqlite3.Connection, period: str | None = None) -> pd.DataFrame:
     sql, params = TASKS_SQL, ()
     if period:
-        sql += " WHERE t.period = ?"
+        sql += " AND t.period = ?"
         params = (period,)
     df = pd.read_sql_query(sql + " ORDER BY t.due_date, c.name", conn, params=params)
     return _decorate_tasks(df, today(conn))
@@ -345,17 +406,24 @@ def task(conn: sqlite3.Connection, task_id: int) -> sqlite3.Row:
     return conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
 
 
+@locked
 def act_on_task(
     conn: sqlite3.Connection,
     task_id: int,
     action_key: str,
     actor_id: int,
     comment: str = "",
+    reference: str = "",
 ) -> str | None:
     """Move a task through the workflow. Returns a client notification if one was sent."""
     t = task(conn, task_id)
     role = staff_role(conn, actor_id)
     new_status = wf.next_status(t["task_type"], t["status"], action_key, role, comment)
+    if not can_act(conn, t, actor_id):
+        raise wf.WorkflowError("ทำได้เฉพาะผู้รับผิดชอบหรือผู้สำรองของงานนี้ (เจ้าของทำแทนได้)")
+    reference = reference.strip()
+    if len(reference) > 40:
+        raise ValueError("เลขที่อ้างอิงยาวเกิน 40 ตัวอักษร")
     on = today(conn).isoformat()
 
     fields = {"status": new_status}
@@ -365,8 +433,12 @@ def act_on_task(
         fields["approved_on"] = on
     if action_key == "return":
         fields["submitted_on"] = None
+    if action_key == "reopen":
+        fields.update(submitted_on=None, approved_on=None, done_on=None, filing_ref="")
     if new_status == wf.DONE:
         fields["done_on"] = on
+    if action_key == "file":
+        fields["filing_ref"] = reference
 
     assignments = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", (*fields.values(), task_id))
@@ -391,12 +463,15 @@ def act_on_task(
     return message
 
 
+@locked
 def reassign_task(conn: sqlite3.Connection, task_id: int, assignee_id: int, actor_id: int) -> None:
     t = task(conn, task_id)
     if t["status"] == wf.DONE:
         raise ValueError("งานที่เสร็จแล้วเปลี่ยนผู้รับผิดชอบไม่ได้")
     if staff_role(conn, assignee_id) == wf.ADMIN:
         raise ValueError("มอบหมายงานบัญชีให้ธุรการไม่ได้")
+    if not conn.execute("SELECT 1 FROM staff WHERE id = ? AND active = 1", (assignee_id,)).fetchone():
+        raise ValueError("มอบหมายงานให้พนักงานที่เลิกใช้งานแล้วไม่ได้")
     conn.execute("UPDATE tasks SET assignee_id = ? WHERE id = ?", (assignee_id, task_id))
     conn.execute(
         """INSERT INTO task_events (task_id, actor_id, action, from_status, to_status, comment, at)
@@ -514,9 +589,11 @@ def client_report(conn: sqlite3.Connection, client_id: int, period: str, lang: s
         channel = tr(d.channel) if isinstance(d.channel, str) and d.channel else "-"
         lines.append(f"| {tr(d.doc_type)} | {tr(DOC_STATUS_LABELS[d.status])} | {channel} | {day(d.received_on)} |")
     lines += ["", f"## {tr('การยื่นแบบภาษี')}", "",
-              f"| {tr('แบบ')} | {tr('กำหนดยื่น')} | {tr('สถานะ')} | {tr('วันที่ยื่น')} |", "|---|---|---|---|"]
+              f"| {tr('แบบ')} | {tr('กำหนดยื่น')} | {tr('สถานะ')} | {tr('วันที่ยื่น')} | {tr('เลขที่อ้างอิง')} |",
+              "|---|---|---|---|---|"]
     for r in t[t["task_type"].map(wf.is_tax_form)].itertuples():
-        lines.append(f"| {tr(r.task_type)} | {day(r.due_date)} | {tr(r.status_label)} | {day(r.done_on)} |")
+        lines.append(f"| {tr(r.task_type)} | {day(r.due_date)} | {tr(r.status_label)} | {day(r.done_on)} | "
+                     f"{r.filing_ref or '-'} |")
 
     outstanding = [tr(x) for x in docs[docs["status"] != DOC_RECEIVED]["doc_type"]]
     lines += ["", f"## {tr('สิ่งที่ต้องดำเนินการต่อ')}", ""]
@@ -531,6 +608,7 @@ def client_report(conn: sqlite3.Connection, client_id: int, period: str, lang: s
     return "\n".join(lines)
 
 
+@locked
 def recompute_due_dates(conn: sqlite3.Connection, period: str) -> int:
     """Re-apply deadline rules, filing method and holidays to the period's open tasks."""
     method = filing_method(conn)
@@ -552,3 +630,246 @@ def recompute_due_dates(conn: sqlite3.Connection, period: str) -> int:
         changed += cur.rowcount
     conn.commit()
     return changed
+
+
+# ---------------------------------------------------------------- who may act, and input checks
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+LINE_RE = re.compile(r"^\S{2,40}$")
+CLIENT_CHANNELS = ("LINE", "อีเมล")
+
+
+def validate_contact(channel: str, contact: str) -> None:
+    contact = contact.strip()
+    if not contact:
+        raise ValueError("ต้องใส่ LINE ID หรืออีเมลของลูกค้า")
+    if channel == "อีเมล" and not EMAIL_RE.match(contact):
+        raise ValueError("รูปแบบอีเมลไม่ถูกต้อง")
+    if channel == "LINE" and not LINE_RE.match(contact):
+        raise ValueError("LINE ID ต้องไม่มีช่องว่าง และยาว 2-40 ตัวอักษร")
+
+
+def can_act(conn: sqlite3.Connection, task_row, actor_id: int) -> bool:
+    """The owner may act on any task; an accountant only on tasks they or their backup own."""
+    role = staff_role(conn, actor_id)
+    if role == wf.OWNER:
+        return True
+    if role != wf.ACCOUNTANT:
+        return False
+    backup = client(conn, task_row["client_id"])["backup_staff_id"]
+    return actor_id in (task_row["assignee_id"], backup)
+
+
+# ---------------------------------------------------------------- document history
+
+def document_events(conn: sqlite3.Connection, client_id: int, period: str) -> pd.DataFrame:
+    return pd.read_sql_query(
+        """SELECT e.at, COALESCE(s.name, '-') AS actor, d.doc_type, e.from_status, e.to_status,
+                  COALESCE(e.channel, '') AS channel, e.note
+           FROM doc_events e
+           JOIN documents d ON d.id = e.document_id
+           LEFT JOIN staff s ON s.id = e.actor_id
+           WHERE d.client_id = ? AND d.period = ?
+           ORDER BY e.id DESC""",
+        conn,
+        params=(client_id, period),
+    )
+
+
+# ---------------------------------------------------------------- client records
+
+def default_doc_types(vat: bool, employees: bool) -> list[str]:
+    docs = ["รายการเดินบัญชีธนาคาร", "บิล/ใบเสร็จค่าใช้จ่าย"]
+    docs += ["ใบกำกับภาษีซื้อ", "ใบกำกับภาษีขาย"] if vat else ["ใบแจ้งหนี้/ใบเสร็จขาย"]
+    if employees:
+        docs.append("สรุปเงินเดือนพนักงาน")
+    return docs
+
+
+def default_forms(vat: bool, employees: bool, pays_individuals: bool) -> list[str]:
+    forms = ["ภ.ง.ด.53"]
+    if employees:
+        forms.append("ภ.ง.ด.1")
+    if pays_individuals:
+        forms.append("ภ.ง.ด.3")
+    if vat:
+        forms.append("ภ.พ.30")
+    return forms
+
+
+def known_doc_types(conn: sqlite3.Connection) -> list[str]:
+    found = {r["doc_type"] for r in conn.execute("SELECT DISTINCT doc_type FROM client_doc_types")}
+    return sorted(found | set(default_doc_types(True, True)) | set(default_doc_types(False, False)))
+
+
+def _check_staff_pair(conn: sqlite3.Connection, primary_staff_id: int, backup_staff_id: int | None) -> None:
+    if backup_staff_id == primary_staff_id:
+        raise ValueError("ผู้รับผิดชอบหลักและสำรองต้องเป็นคนละคน")
+    for staff_id in (primary_staff_id, backup_staff_id):
+        if staff_id is None:
+            continue
+        row = conn.execute("SELECT role, active FROM staff WHERE id = ?", (staff_id,)).fetchone()
+        if not row or not row["active"] or row["role"] != wf.ACCOUNTANT:
+            raise ValueError("ผู้รับผิดชอบต้องเป็นพนักงานบัญชีที่ยังใช้งานอยู่")
+
+
+@locked
+def add_client(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    business_type: str,
+    vat_registered: bool,
+    has_employees: bool,
+    pays_individuals: bool,
+    channel: str,
+    contact: str,
+    primary_staff_id: int,
+    backup_staff_id: int | None,
+    notes: str = "",
+) -> int:
+    """Create a client with the standard documents and tax forms, and add them to the open period."""
+    name = " ".join(name.split())
+    if not name:
+        raise ValueError("ต้องใส่ชื่อลูกค้า")
+    if channel not in CLIENT_CHANNELS:
+        raise ValueError("ช่องทางแจ้งเตือนต้องเป็น LINE หรืออีเมล")
+    validate_contact(channel, contact)
+    _check_staff_pair(conn, primary_staff_id, backup_staff_id)
+    try:
+        cur = conn.execute(
+            """INSERT INTO clients (name, business_type, vat_registered, has_employees, channel, contact,
+                   primary_staff_id, backup_staff_id, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (name, business_type.strip() or "-", int(vat_registered), int(has_employees), channel,
+             contact.strip(), primary_staff_id, backup_staff_id, notes.strip()),
+        )
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise ValueError("มีลูกค้าชื่อนี้อยู่แล้ว") from None
+    client_id = int(cur.lastrowid)
+    conn.executemany("INSERT INTO client_doc_types (client_id, doc_type) VALUES (?, ?)",
+                     [(client_id, d) for d in default_doc_types(vat_registered, has_employees)])
+    conn.executemany("INSERT INTO client_forms (client_id, form) VALUES (?, ?)",
+                     [(client_id, f) for f in default_forms(vat_registered, has_employees, pays_individuals)])
+    conn.commit()
+    _open_latest_period(conn)
+    return client_id
+
+
+def _open_latest_period(conn: sqlite3.Connection) -> None:
+    existing = periods(conn)
+    if existing:
+        open_period(conn, existing[0])
+    else:  # a blank office: the very first client opens the month before today
+        from .periods import add_months, period_of
+        open_period(conn, add_months(period_of(today(conn)), -1))
+
+
+@locked
+def update_client_profile(
+    conn: sqlite3.Connection,
+    client_id: int,
+    *,
+    business_type: str,
+    vat_registered: bool,
+    has_employees: bool,
+    forms: list[str],
+    doc_types: list[str],
+) -> None:
+    """Change what a client sends and files. New items appear in the latest period; items that were
+    removed disappear from it only if nobody has started them, so no recorded work is lost."""
+    from .deadlines import TAX_FORMS
+
+    if not doc_types:
+        raise ValueError("ต้องเลือกเอกสารที่ลูกค้าต้องส่งอย่างน้อย 1 รายการ")
+    if any(f not in TAX_FORMS for f in forms):
+        raise ValueError("แบบภาษีที่เลือกไม่ถูกต้อง")
+    old_forms, old_docs = set(client_forms(conn, client_id)), set(client_doc_types(conn, client_id))
+    conn.execute(
+        "UPDATE clients SET business_type = ?, vat_registered = ?, has_employees = ? WHERE id = ?",
+        (business_type.strip() or "-", int(vat_registered), int(has_employees), client_id),
+    )
+    conn.execute("DELETE FROM client_forms WHERE client_id = ?", (client_id,))
+    conn.executemany("INSERT INTO client_forms (client_id, form) VALUES (?, ?)", [(client_id, f) for f in forms])
+    conn.execute("DELETE FROM client_doc_types WHERE client_id = ?", (client_id,))
+    conn.executemany("INSERT INTO client_doc_types (client_id, doc_type) VALUES (?, ?)",
+                     [(client_id, d) for d in doc_types])
+
+    latest = (periods(conn) or [None])[0]
+    if latest:
+        for form in old_forms - set(forms):
+            conn.execute("DELETE FROM tasks WHERE client_id = ? AND period = ? AND task_type = ? AND status = 'todo'",
+                         (client_id, latest, form))
+        for doc in old_docs - set(doc_types):
+            ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM documents WHERE client_id = ? AND period = ? AND doc_type = ? AND status = 'missing'",
+                (client_id, latest, doc))]
+            for doc_id in ids:
+                conn.execute("DELETE FROM doc_events WHERE document_id = ?", (doc_id,))
+                conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    conn.commit()
+    _open_latest_period(conn)
+
+
+@locked
+def set_client_active(conn: sqlite3.Connection, client_id: int, active: bool) -> None:
+    """Stop (or resume) working for a client. Nothing is deleted, so history and reports survive."""
+    conn.execute("UPDATE clients SET active = ? WHERE id = ?", (int(active), client_id))
+    conn.commit()
+    if active:
+        _open_latest_period(conn)
+
+
+# ---------------------------------------------------------------- staff
+
+@locked
+def add_staff(conn: sqlite3.Connection, name: str, role: str) -> int:
+    name = " ".join(name.split())
+    if not name:
+        raise ValueError("ต้องใส่ชื่อพนักงาน")
+    if role not in wf.ROLE_LABELS:
+        raise ValueError("บทบาทไม่ถูกต้อง")
+    if conn.execute("SELECT 1 FROM staff WHERE name = ? AND active = 1", (name,)).fetchone():
+        raise ValueError("มีพนักงานชื่อนี้อยู่แล้ว")
+    cur = conn.execute("INSERT INTO staff (name, role) VALUES (?, ?)", (name, role))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+@locked
+def set_staff_active(conn: sqlite3.Connection, staff_id: int, active: bool) -> None:
+    if not active:
+        role = staff_role(conn, staff_id)
+        if role == wf.OWNER and conn.execute(
+                "SELECT COUNT(*) FROM staff WHERE role = 'owner' AND active = 1 AND id != ?", (staff_id,)
+        ).fetchone()[0] == 0:
+            raise ValueError("ต้องมีเจ้าของที่ใช้งานอยู่อย่างน้อย 1 คน")
+        clients_n = conn.execute(
+            "SELECT COUNT(*) FROM clients WHERE active = 1 AND (primary_staff_id = ? OR backup_staff_id = ?)",
+            (staff_id, staff_id)).fetchone()[0]
+        if clients_n:
+            raise wf.WorkflowError("ยังเป็นผู้รับผิดชอบหลักหรือสำรองของลูกค้า {n} ราย ย้ายลูกค้าให้คนอื่นก่อน",
+                                   n=str(clients_n))
+        tasks_n = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE assignee_id = ? AND status != 'done'", (staff_id,)).fetchone()[0]
+        if tasks_n:
+            raise wf.WorkflowError("ยังมีงานที่ยังไม่เสร็จ {n} งาน ย้ายงานให้คนอื่นก่อน", n=str(tasks_n))
+    conn.execute("UPDATE staff SET active = ? WHERE id = ?", (int(active), staff_id))
+    conn.commit()
+
+
+# ---------------------------------------------------------------- backup
+
+def backup_bytes(conn: sqlite3.Connection) -> bytes:
+    """A consistent copy of the whole database, as the bytes of a SQLite file."""
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "backup.db")
+        target = sqlite3.connect(path)
+        try:
+            with _LOCK:
+                conn.backup(target)
+        finally:
+            target.close()
+        with open(path, "rb") as handle:
+            return handle.read()
