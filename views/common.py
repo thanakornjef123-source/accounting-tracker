@@ -200,13 +200,20 @@ def sidebar(conn: sqlite3.Connection) -> Ctx:
             st.markdown(f"**{t(names.at[user_id, 'name'])}** · {t(wf.ROLE_LABELS[names.at[user_id, 'role']])}")
             st.button(t("ออกจากระบบ"), on_click=_sign_out, key="sign_out", width="stretch")
         else:
+            # The key carries the language so the browser rebuilds the labels when it changes
+            pick_key = f"user_pick_{lang()}"
+            ids = staff["id"].tolist()
+            if pick_key not in st.session_state:
+                current_user = st.session_state.get("user_id")
+                st.session_state[pick_key] = current_user if current_user in ids else ids[0]
             user_id = st.selectbox(
                 t("ใช้งานในฐานะ"),
-                staff["id"].tolist(),
+                ids,
                 format_func=lambda i: f"{t(names.at[i, 'name'])} · {t(wf.ROLE_LABELS[names.at[i, 'role']])}",
-                key="user_id",
+                key=pick_key,
                 help=t("ระบบตัวอย่างไม่มีการล็อกอิน เลือกบทบาทเพื่อดูว่าแต่ละคนทำอะไรได้บ้าง"),
             )
+            st.session_state["user_id"] = user_id
         periods = repo.periods(conn)
         if "period" in st.session_state and st.session_state["period"] not in periods:
             del st.session_state["period"]

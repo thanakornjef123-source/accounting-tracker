@@ -166,7 +166,7 @@ def test_sidebar_change_demo_date():
 @pytest.mark.parametrize("role", ROLES)
 def test_sidebar_role_and_period_switch(role):
     at = page("dashboard")
-    at.sidebar.selectbox(key="user_id").select(ROLES[role]).run()
+    at.sidebar.selectbox(key="user_pick_th").select(ROLES[role]).run()
     ok(at)
     at.sidebar.selectbox(key="period").select("2026-08").run()
     ok(at)
