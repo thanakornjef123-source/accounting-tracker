@@ -15,7 +15,7 @@ from tracker.en import EN
 from tracker.i18n import date_text, period_text, translate
 from views.common import get_conn
 
-from test_ui_buttons import PAGES, ROLES
+from test_ui_buttons import ALL_PAGES, PAGES, ROLES
 
 ROOT = Path(__file__).resolve().parent.parent
 THAI = re.compile("[฀-๿]")
@@ -38,8 +38,10 @@ def _source_sentences() -> set[str]:
         if path.name in ("en.py", "i18n.py"):
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.args:
-                if node.func.id in {"t", "tr", "page_header", "page", "translate", "ValueError", "WorkflowError"}:
+            if isinstance(node, ast.Call) and node.args:
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+                if name in {"t", "tr", "page_header", "page", "translate", "ValueError", "WorkflowError"}:
                     arg = node.args[0]
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and THAI.search(arg.value):
                         found.add(arg.value)
@@ -106,7 +108,7 @@ def english(module: str, user_id: int):
     return at.run()
 
 
-@pytest.mark.parametrize("module", PAGES)
+@pytest.mark.parametrize("module", ALL_PAGES)
 @pytest.mark.parametrize("role", ROLES)
 def test_no_thai_left_in_english_mode(module, role):
     at = english(module, ROLES[role])

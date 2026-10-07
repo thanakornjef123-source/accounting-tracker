@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from views import approvals, calendar, clients, dashboard, documents, notifications, reports, tasks
+from views import approvals, calendar, clients, dashboard, documents, notifications, reports, staff, tasks
 from views import theme
 from views.common import _init_lang, get_conn, lang, sidebar, t
 
@@ -33,6 +33,7 @@ navigation = st.navigation({
     ],
     t("ตั้งค่า"): [
         page(calendar, "ปฏิทินกำหนดยื่น", ":material/event:", "deadlines"),
+        page(staff, "ทีมงาน", ":material/badge:", "staff"),
     ],
 })
 navigation.run()

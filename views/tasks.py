@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from tracker import repo
@@ -70,6 +71,13 @@ def render(ctx: Ctx) -> None:
         height=420,
     )
 
+    export = pd.DataFrame({
+        t("ลูกค้า"): view["client"], t("งาน"): view["task_type"], t("ผู้รับผิดชอบ"): view["assignee"],
+        t("สถานะ"): view["status_label"], t("กำหนด"): view["due_date"], t("เลขที่อ้างอิงการยื่น"): view["filing_ref"],
+    })
+    st.download_button(t("ดาวน์โหลดตารางนี้ (CSV)"), export.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"tasks_{ctx.period}.csv", mime="text/csv", key="tasks_csv")
+
     selected = event.selection.rows if event and event.selection else []
     if not selected:
         return
@@ -92,6 +100,8 @@ def _detail(ctx: Ctx, task_id: int, workers) -> None:
     m3.metric(t("ผู้รับผิดชอบ"), t(row["assignee"]))
     m4.metric(t("ผู้รับผิดชอบสำรอง"), t(repo.staff_name(conn, c["backup_staff_id"])) if c["backup_staff_id"] else "-")
 
+    if tk["filing_ref"]:
+        st.caption(t("เลขที่อ้างอิงการยื่น: {ref}", ref=tk["filing_ref"]))
     if not repo.docs_complete(conn, c["id"], tk["period"]) and tk["status"] in (wf.TODO, wf.DOING):
         st.warning(t("ลูกค้ารายนี้ยังส่งเอกสารเดือนนี้ไม่ครบ ดูรายละเอียดที่หน้าเอกสารลูกค้า"))
     returned = repo.last_return_comment(conn, task_id)
@@ -101,10 +111,16 @@ def _detail(ctx: Ctx, task_id: int, workers) -> None:
         st.info(t("ข้อควรระวังของลูกค้ารายนี้: {notes}", notes=t(c["notes"])))
 
     actions = wf.available_actions(tk["task_type"], tk["status"], ctx.role)
+    permitted = repo.can_act(conn, tk, ctx.user_id)
+    if actions and not permitted:
+        actions = []
     left, right = st.columns(2, gap="large")
     with left:
         st.markdown("##### " + t("อัปเดตสถานะ"))
-        if not actions:
+        if not actions and ctx.role == wf.ACCOUNTANT and not permitted and tk["status"] != wf.DONE:
+            st.caption(t("งานนี้เป็นของ {name} ผู้รับผิดชอบ ผู้สำรอง หรือเจ้าของเท่านั้นที่ทำต่อได้",
+                         name=t(row["assignee"])))
+        elif not actions:
             if tk["status"] == wf.REVIEW and not ctx.is_owner:
                 st.caption(t("งานนี้รอเจ้าของตรวจ เปลี่ยนผู้ใช้เป็นเจ้าของที่แถบด้านซ้ายเพื่ออนุมัติ"))
             elif tk["status"] == wf.DONE:
@@ -113,14 +129,17 @@ def _detail(ctx: Ctx, task_id: int, workers) -> None:
                 st.caption(t("บทบาทนี้อัปเดตงานบัญชีไม่ได้"))
         comment = ""
         if any(a.needs_comment for a in actions):
-            comment = st.text_input(t("เหตุผลที่ส่งกลับ (ถ้าส่งกลับ)"), key=f"comment_{task_id}")
+            comment = st.text_input(t("เหตุผล (ถ้าส่งกลับหรือเปิดงานกลับมาแก้)"), key=f"comment_{task_id}")
+        reference = ""
+        if any(a.key == "file" for a in actions):
+            reference = st.text_input(t("เลขที่อ้างอิงการยื่น (ถ้ามี)"), key=f"reference_{task_id}", max_chars=40)
         cols = st.columns(max(len(actions), 1))
         for col, action in zip(cols, actions):
             if col.button(t(action.label), key=f"{action.key}_{task_id}", width="stretch",
-                          type="primary" if not action.needs_comment else "secondary"):
+                          type="primary" if action.key in ("start", "submit", "approve", "file", "complete") else "secondary"):
                 try:
-                    message = repo.act_on_task(conn, task_id, action.key, ctx.user_id, comment)
-                except wf.WorkflowError as exc:
+                    message = repo.act_on_task(conn, task_id, action.key, ctx.user_id, comment, reference)
+                except ValueError as exc:
                     st.error(error_text(exc))
                 else:
                     flash(f"{t(action.label)}: {t(tk['task_type'])} · {t(c['name'])}")
@@ -139,9 +158,13 @@ def _detail(ctx: Ctx, task_id: int, workers) -> None:
             new_id = st.selectbox(t("ย้ายงานไปให้"), names.index.tolist(), format_func=lambda i: t(names[i]),
                                   index=names.index.tolist().index(tk["assignee_id"]), key=f"assign_{task_id}")
             if st.button(t("ย้ายงาน"), key=f"reassign_{task_id}", disabled=new_id == tk["assignee_id"]):
-                repo.reassign_task(conn, task_id, int(new_id), ctx.user_id)
-                flash(t("ย้ายงานไปให้ {name} แล้ว", name=t(names[new_id])))
-                st.rerun()
+                try:
+                    repo.reassign_task(conn, task_id, int(new_id), ctx.user_id)
+                except ValueError as exc:
+                    st.error(error_text(exc))
+                else:
+                    flash(t("ย้ายงานไปให้ {name} แล้ว", name=t(names[new_id])))
+                    st.rerun()
 
     history = repo.task_events(conn, task_id)
     if not history.empty:

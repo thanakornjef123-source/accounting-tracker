@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import streamlit as st
 
-from tracker import db, repo, seed
+from tracker import auth, db, repo, seed
 from tracker import workflow as wf
 from tracker.i18n import DEFAULT_LANG, LANG_NAMES, LANGS, date_text, period_text, translate
 from tracker.periods import add_months
@@ -80,7 +81,10 @@ def get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(DB_PATH)
     if db.is_empty(conn):
-        seed.seed(conn)
+        if os.environ.get("TRACKER_SEED", "1") == "0":
+            seed.init_blank(conn)  # a real office starts empty
+        else:
+            seed.seed(conn)
     return conn
 
 
@@ -129,38 +133,104 @@ def _reset_demo(conn: sqlite3.Connection) -> None:
     flash(t("โหลดข้อมูลตัวอย่างใหม่แล้ว"))
 
 
+def _sign_out() -> None:
+    for key in ("auth_user", "user_id"):
+        st.session_state.pop(key, None)
+
+
+def _login_screen(conn: sqlite3.Connection) -> None:
+    """Ask for a name and password (or, the very first time, for the owner's new password)."""
+    st.title(t("เข้าสู่ระบบ"))
+    if auth.owner_needs_setup(conn):
+        st.info(t("ยังไม่มีรหัสผ่านเจ้าของ ตั้งรหัสผ่านตอนนี้เพื่อเริ่มใช้งาน"))
+        with st.form("owner_setup"):
+            first = st.text_input(t("รหัสผ่านใหม่"), type="password", key="setup_password")
+            again = st.text_input(t("ยืนยันรหัสผ่าน"), type="password", key="setup_confirm")
+            st.caption(t("อย่างน้อย 8 ตัวอักษร มีทั้งตัวอักษรและตัวเลข"))
+            if st.form_submit_button(t("ตั้งรหัสผ่านและเข้าใช้งาน"), type="primary"):
+                try:
+                    if first != again:
+                        raise ValueError("รหัสผ่านสองช่องไม่ตรงกัน")
+                    owner_id = auth.first_owner_id(conn)
+                    auth.set_password(conn, owner_id, first)
+                except ValueError as exc:
+                    st.error(error_text(exc))
+                else:
+                    st.session_state["auth_user"] = owner_id
+                    st.rerun()
+        return
+    with st.form("login"):
+        name = st.text_input(t("ชื่อผู้ใช้"), key="login_name")
+        password = st.text_input(t("รหัสผ่าน"), type="password", key="login_password")
+        if st.form_submit_button(t("เข้าสู่ระบบ"), type="primary"):
+            wait = auth.seconds_locked(name)
+            if wait:
+                st.error(t("ใส่ผิดหลายครั้ง รออีก {n} วินาทีแล้วลองใหม่", n=wait))
+            else:
+                user = auth.authenticate(conn, name, password)
+                if user is None:
+                    auth.record_failure(name)
+                    time.sleep(0.8)
+                    st.error(t("ชื่อหรือรหัสผ่านไม่ถูกต้อง"))
+                else:
+                    auth.clear_failures(name)
+                    st.session_state["auth_user"] = user
+                    st.rerun()
+
+
 def sidebar(conn: sqlite3.Connection) -> Ctx:
-    staff = repo.staff(conn)
     with st.sidebar:
         st.radio("Language / ภาษา", LANGS, key="lang", horizontal=True, format_func=LANG_NAMES.get,
                  on_change=_remember_lang)
-        st.caption(t("กรณีศึกษา · ข้อมูลทั้งหมดเป็นข้อมูลจำลอง"))
+        if repo.is_demo(conn):
+            st.caption(t("กรณีศึกษา · ข้อมูลทั้งหมดเป็นข้อมูลจำลอง"))
 
-        names = staff.set_index("id")
-        user_id = st.selectbox(
-            t("ใช้งานในฐานะ"),
-            staff["id"].tolist(),
-            format_func=lambda i: f"{t(names.at[i, 'name'])} · {t(wf.ROLE_LABELS[names.at[i, 'role']])}",
-            key="user_id",
-            help=t("ระบบตัวอย่างไม่มีการล็อกอิน เลือกบทบาทเพื่อดูว่าแต่ละคนทำอะไรได้บ้าง"),
-        )
+    staff = repo.staff(conn)
+    names = staff.set_index("id")
+    signed_in = auth.auth_enabled()
+    if signed_in:
+        user_id = st.session_state.get("auth_user")
+        if user_id not in names.index:
+            _sign_out()
+            _login_screen(conn)
+            st.stop()
+
+    with st.sidebar:
+        if signed_in:
+            st.markdown(f"**{t(names.at[user_id, 'name'])}** · {t(wf.ROLE_LABELS[names.at[user_id, 'role']])}")
+            st.button(t("ออกจากระบบ"), on_click=_sign_out, key="sign_out", width="stretch")
+        else:
+            user_id = st.selectbox(
+                t("ใช้งานในฐานะ"),
+                staff["id"].tolist(),
+                format_func=lambda i: f"{t(names.at[i, 'name'])} · {t(wf.ROLE_LABELS[names.at[i, 'role']])}",
+                key="user_id",
+                help=t("ระบบตัวอย่างไม่มีการล็อกอิน เลือกบทบาทเพื่อดูว่าแต่ละคนทำอะไรได้บ้าง"),
+            )
         periods = repo.periods(conn)
         if "period" in st.session_state and st.session_state["period"] not in periods:
             del st.session_state["period"]
         period = st.selectbox(t("รอบงาน (เดือนของบัญชี)"), periods, format_func=period_label, key="period")
 
-        with st.expander(t("ตั้งค่าเดโม")):
-            current = repo.today(conn)
-            new_today = st.date_input(t("วันที่จำลอง"), current,
-                                      help=t("ทุกหน้าคำนวณวันค้างและวันเลยกำหนดจากวันนี้"))
-            if new_today != current:
-                repo.set_setting(conn, "today", new_today.isoformat())
-                st.rerun()
+        demo = repo.is_demo(conn)
+        with st.expander(t("ตั้งค่าเดโม") if demo else t("จัดการข้อมูล")):
+            if demo:
+                current = repo.today(conn)
+                new_today = st.date_input(t("วันที่จำลอง"), current,
+                                          help=t("ทุกหน้าคำนวณวันค้างและวันเลยกำหนดจากวันนี้"))
+                if new_today != current:
+                    repo.set_setting(conn, "today", new_today.isoformat())
+                    st.rerun()
             nxt = add_months(periods[0], 1)
             st.button(t("เปิดรอบงาน {period}", period=period_label(nxt)), width="stretch",
                       on_click=_open_period, args=(conn, nxt))
-            st.button(t("ล้างข้อมูลและโหลดข้อมูลตัวอย่างใหม่"), width="stretch",
-                      on_click=_reset_demo, args=(conn,))
+            if demo:
+                st.button(t("ล้างข้อมูลและโหลดข้อมูลตัวอย่างใหม่"), width="stretch",
+                          on_click=_reset_demo, args=(conn,))
+            if names.at[user_id, "role"] == wf.OWNER:
+                st.download_button(t("สำรองฐานข้อมูล (ไฟล์ .db)"), lambda: repo.backup_bytes(conn), width="stretch",
+                                   file_name="tracker-backup.db", mime="application/octet-stream",
+                                   help=t("ไฟล์นี้มีข้อมูลทั้งหมดของสำนักงาน เก็บไว้ในที่ปลอดภัย"))
 
     row = staff.set_index("id").loc[user_id]
     return Ctx(conn, int(user_id), row["name"], row["role"], period, repo.today(conn))

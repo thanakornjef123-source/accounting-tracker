@@ -37,6 +37,10 @@ def render(ctx: Ctx) -> None:
         df = df[matches(df["client"], search)]
 
     st.caption(t("{n} ข้อความ", n=len(df)))
+    st.download_button(
+        t("ดาวน์โหลดตารางนี้ (CSV)"),
+        df[["created_on", "client", "event", "channel", "contact", "message"]].to_csv(index=False).encode("utf-8-sig"),
+        file_name="notifications.csv", mime="text/csv", key="notif_csv")
     st.dataframe(
         df.assign(date=df["created_on"].map(fmt_date), kind=df["event"].map(lambda e: t(repo.EVENT_LABELS[e])),
                   channel=df["channel"].map(t), client=df["client"].map(t))

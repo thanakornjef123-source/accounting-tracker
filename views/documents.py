@@ -47,6 +47,14 @@ def _summary(ctx: Ctx) -> None:
         width="stretch",
     )
 
+    st.download_button(
+        t("ดาวน์โหลดตารางนี้ (CSV)"),
+        view[["client", "primary_staff", "received", "required", "outstanding"]]
+        .rename(columns={"client": t("ลูกค้า"), "primary_staff": t("ผู้รับผิดชอบ"), "received": t("ได้รับแล้ว"),
+                         "required": t("ต้องส่ง"), "outstanding": t("ยังขาด / ต้องขอใหม่")})
+        .to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"documents_{ctx.period}.csv", mime="text/csv", key="docs_csv")
+
     if incomplete.empty:
         st.success(t("ลูกค้าทุกรายส่งเอกสารครบแล้ว"))
         return
@@ -104,7 +112,7 @@ def _record(ctx: Ctx) -> None:
             st.info(t("ไม่มีการเปลี่ยนแปลง"))
             return
         try:
-            messages = repo.update_documents(ctx.conn, changes)
+            messages = repo.update_documents(ctx.conn, changes, ctx.user_id)
         except ValueError as exc:
             st.error(error_text(exc))
             return
@@ -112,6 +120,22 @@ def _record(ctx: Ctx) -> None:
         for m in messages:
             flash(t("แจ้งลูกค้าอัตโนมัติ: {message}", message=m), "info")
         st.rerun()
+
+    history = repo.document_events(ctx.conn, client_id, ctx.period)
+    if not history.empty:
+        with st.expander(t("ประวัติการแก้ไขเอกสารของลูกค้ารายนี้")):
+            shown = history.assign(
+                at=history["at"].map(fmt_date), actor=history["actor"].map(t),
+                doc=history["doc_type"].map(t),
+                change=[f"{t(repo.DOC_STATUS_LABELS[a])} → {t(repo.DOC_STATUS_LABELS[b])}"
+                        for a, b in zip(history["from_status"], history["to_status"])],
+                channel=history["channel"].map(lambda c: t(c) if c else "-"),
+            )
+            st.dataframe(shown[["at", "actor", "doc", "change", "channel", "note"]],
+                         column_config={"at": t("วันที่"), "actor": t("ผู้ทำ"), "doc": t("เอกสาร"),
+                                        "change": t("เปลี่ยนสถานะ"), "channel": t("ช่องทาง"),
+                                        "note": t("หมายเหตุ")},
+                         hide_index=True, width="stretch")
 
 
 def _diff(before: pd.DataFrame, after: pd.DataFrame) -> list[dict]:

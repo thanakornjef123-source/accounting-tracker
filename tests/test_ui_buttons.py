@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OWNER, SOMCHAI, NAPA, KITTI, ADMIN = 1, 2, 3, 4, 5
 ROLES = {"owner": OWNER, "accountant": SOMCHAI, "admin": ADMIN}
 PAGES = ["dashboard", "documents", "tasks", "approvals", "calendar", "clients", "notifications", "reports"]
+ALL_PAGES = PAGES + ["staff"]
 
 
 @pytest.fixture(autouse=True)
