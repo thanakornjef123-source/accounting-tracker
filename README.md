@@ -81,7 +81,7 @@
 **macOS / Linux / ทำเอง:**
 
 ```bash
-git clone https://github.com/<username>/accounting-tracker.git
+git clone https://github.com/thanakornjef123-source/accounting-tracker.git
 cd accounting-tracker
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
