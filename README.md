@@ -6,6 +6,10 @@
 
 *A Streamlit + SQLite case-study app that tracks a small accounting office's monthly cycle — document intake, bookkeeping, owner approval, tax filing deadlines and client notifications. All data is synthetic.*
 
+**ลองใช้งานได้เลย (Live demo):** [https://accounting-tracker-6kontjlwwsw8vxriw2arvf.streamlit.app/](https://accounting-tracker-6kontjlwwsw8vxriw2arvf.streamlit.app/)
+
+> เดโมอาจ "หลับ" ถ้าไม่มีคนเข้านาน กดปุ่ม Wake up แล้วรอประมาณ 30 วินาที ข้อมูลเป็นข้อมูลจำลองและจะกลับเป็นค่าเริ่มต้นเมื่อแอปรีสตาร์ต
+
 ![ภาพรวม](docs/overview.png)
 
 ## บทบาทของฉันในโปรเจกต์
