@@ -17,8 +17,5 @@ primaryColor = "#F58220"
 linkColor = "#FFFFFF"
 borderColor = "#6B4BA0"
 
-[server]
-headless = false
-
 [browser]
 gatherUsageStats = false
